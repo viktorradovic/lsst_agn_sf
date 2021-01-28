@@ -11,10 +11,9 @@ from ipywidgets import widgets
 from IPython.display import display
 import time
 
-# LSST libraries, MAF metrics
+# Authors: dr Andjelka Kovacevic & Isidora Jankov & Viktor Radovic
 
-
-def LC_conti(long, deltatc=1, oscillations=True, A=0.2, P=500):
+def LC_conti(long, deltatc=1, oscillations=True, A=0.14, noise=0.00005, z=0, z_corr='Kelly'):
     """ 
     Parameters:
     -----------
@@ -24,17 +23,25 @@ def LC_conti(long, deltatc=1, oscillations=True, A=0.2, P=500):
         Cadence (time interval between two observations or samplings of the light curve in days).
     oscillations: bool, default=True
         If True, light curve simulation will take an oscillatory signal into account.
-    P: float or int, default=500
-        Period of the oscillatory signal in days.
     A: float or int, default=0.2
         Amplitude of the oscillatory signal in magnitudes.
-     
+    noise: float, default=0.00005
+        Add noise to the simulated light curve.
+    z: float, default=0
+        Redshift. It is used for converting damping time scale (tau) and an amplitude of correlation decay (sigma)
+        to observed frame.
+    z_corr: 'Kelly' or 'Standard', default='Kelly'
+        Method of calculation and conversion of tau and sigma to observed frame. 
+            - 'Kelly' refers to calculations according to eq. (22) and (25) in Kelly+2009.
+            - 'Standard' refers to calculations according to eq. (22) and (25) in Kelly+2009 but omitting redshift in the equation.
+               After the calculation, tau and sigma are converted to observed frame according to eq. (17) and (18) in Kelly+2009.
+    
     Returns:
     --------
-    yy: np.array
-        Obesrved light curve points in magnitudes.
     tt: np.array
-        Survey days when the light curve points were sampled.
+        Survey days when the light curve points are sampled.
+    yy: np.array
+        Simulated light curve points in magnitudes.
     """
     
     # Generating survey days 
@@ -44,57 +51,80 @@ def LC_conti(long, deltatc=1, oscillations=True, A=0.2, P=500):
     # Constants
     const1 = 0.455*1.25*1e38
     const2 = np.sqrt(1e09)
-    SFCONST2 = 0.18
-    meanmag = 23
+    meanmag = 23.
     
     # Generating log L_bol
-    loglumbol = np.random.uniform(42.2,47,1)
+    loglumbol = np.random.uniform(42.2,49,1)
     lumbol = np.power(10,loglumbol)
 
     # Calculate M_{SMBH}
     msmbh=np.power((lumbol*const2/const1),2/3.)
     
-    # Calculate damping time scale
-    tau = 80.4*np.power(lumbol/1e45,-0.42)*np.power(msmbh/1e08,1.03)
+    if z_corr == 'Kelly':
+        # Calculate damping time scale
+        logtau = -8.13+0.24*np.log10(lumbol)+0.34*np.log10(1+z)
+        tau = np.power(10,logtau)
+        # Calculate log sigma^2 - an amplitude of correlation decay
+        logsig2 = 8-0.27*np.log10(lumbol)+0.47*np.log10(1+z)
+        sig=np.sqrt(np.power(10,logsig2))
+    elif z_corr == 'Standard':
+        # Calculate damping time scale
+        logtau = -8.13+0.24*np.log10(lumbol)
+        tau = np.power(10,logtau)*(1+z)
+        # Calculate log sigma^2 - an amplitude of correlation decay
+        logsig2 = 8-0.27*np.log10(lumbol)
+        sig=np.sqrt(np.power(10,logsig2))/np.sqrt(1+z)
     
-    # Calculate  log sigma^2 - an amplitude of correlation decay
-    logsig2=-3.83-0.09*np.log10(lumbol/1e45)-0.25*np.log10(msmbh/1e08)
-    sig2=np.power(10,logsig2)
+    # OPTIONAL: Calculate broad line region (BLR) radius
+    logrblr=1.527+0.533*np.log10(lumbol/1e44)
+    rblr=np.power(10,logrblr)
+    rblr=rblr/10
     
     # Calculating light curve points
     ss = np.zeros(times)
-    ss[0] = np.random.normal(meanmag, np.sqrt(sig2), 1)
+    #ss[0] = np.random.normal(meanmag, sig, 1)
+    ss[0] = meanmag
+    SFCONST2=sig*sig
     ratio = -deltatc/tau
-    ssigma1=np.sqrt(sig2)*np.sqrt((1-np.exp(2*ratio)))
+    #ssigma1=np.sqrt(sig2)*np.sqrt((1-np.exp(2*ratio)))
     
     for i in range(1, times):
         ss[i] = np.random.normal(ss[i-1]*np.exp(ratio) + meanmag*(1-np.exp(ratio)),
-                                     np.sqrt(np.abs(0.5*SFCONST2*SFCONST2*(1-np.exp(-2*ratio)))),1)
+                                     np.sqrt(10*0.5*tau*SFCONST2*((1-np.exp(2*ratio)))),1)
         
     # Calculating error (Ivezic et al. 2019) --> https://iopscience.iop.org/article/10.3847/1538-4357/ab042c/pdf
     gamma=0.039
     m5=24.7
-    x=np.zeros(len(ss))
+    x=np.zeros(ss.shape)
     x=np.power(10, 0.4*(ss-m5))
 
     greska2=(0.005**2)+(0.04-gamma)*x+gamma*x*x
     
     # Final light curve with oscillations
     if oscillations == True:
-        sinus=A*np.sin(2*np.pi*tt/P)
+        # Calculate the period of artificial oscillations
+        conver=173.145 # convert from LightDays to AU
+        lightdays=10.
+        P = np.sqrt(((lightdays*conver)**3)/(msmbh))
+        sinus=A*np.sin(2*np.pi*tt/(P*365.))
+        ss = ss + sinus
         yy = np.zeros(times)
         for i in range(times):
-            yy[i]=ss[i]+np.sqrt(greska2[i]) + sinus[i]
+            # Error, noise and oscillatory signal are added to each flux value
+            #yy[i] = ss[i] + np.sqrt(greska2[i]) + np.random.normal(0,(noise*greska2[i]),1) + sinus[i]
+            yy[i] = ss[i] + np.random.normal(0,((noise*ss[i])),1) + np.sqrt(greska2[i])
     
-        return yy, tt
+        return tt, yy
     
     # Final light curve without oscillations
     if oscillations == False:
         yy = np.zeros(times)
         for i in range(times):
-            yy[i]=ss[i]+np.sqrt(greska2[i])
+            # Error and noise are added to each flux value
+            #yy[i] = ss[i] + np.sqrt(greska2[i]) + np.random.normal(0,(noise*greska2[i]),1)
+            yy[i] = ss[i] + np.random.normal(0,((noise*ss[i])),1) + np.sqrt(greska2[i])
     
-        return yy, tt
+        return tt, yy
 
 def LC_conti_old(long, sigma, tau, deltatc=1, oscillations=True, A=0.2, P=500, noise=0.05):
     """ 
@@ -144,7 +174,7 @@ def LC_conti_old(long, sigma, tau, deltatc=1, oscillations=True, A=0.2, P=500, n
         for i in range(times):
             yy[i]=ss[i]+np.random.normal(0,(noise*np.abs(ss[i])),1)+sinus[i]
         
-        return yy, tt
+        return tt, yy
     
     # Light curve without oscillations
     elif oscillations == False:
@@ -154,7 +184,7 @@ def LC_conti_old(long, sigma, tau, deltatc=1, oscillations=True, A=0.2, P=500, n
         for i in range(times):
             yy[i]=ss[i]+np.random.normal(0,(noise*np.abs(ss[i])),1)
         
-        return yy, tt
+        return tt, yy
 
 
 def LC_opsim(mjd,t,y):
@@ -164,16 +194,16 @@ def LC_opsim(mjd,t,y):
     mjd: np.array
         Modified Julian Date obtained from OpSim. It is the time of each sampling for the light curve.
     t: np.array
-        Days during the survey on which we had an observation for continuous simulated light curve (cadence = 1 day).
+        Days during the survey on which we had an observation for continuous simulated light curve.
     y: np.array
-        Obesrved light curve points (Eq. 17 in Kovacevic+2020) for continuous simulated light curve (cadence = 1 day).
+        Light curve flux (Eq. 17 in Kovacevic+2020) for continuous simulated light curve.
      
     Returns:
     --------
     top: np.array
         Days during the survey on which we had an observation (sampling) in a given OpSim.
     yop: np.array
-        Observed light curve points taken from the continuous light curve on days we had an observation (sampling) in a 
+        Light curve flux taken from the continuous light curve on days we had an observation (sampling) in a 
         given OpSim.
     """
     # Racunamo duzinu surveya (ALI SE NE KORISTI NIGDE, izbrisati?)
@@ -203,47 +233,46 @@ def LC_opsim(mjd,t,y):
     return top,yop
   
 
-def sf(rol1t,rol1):
+def sf(t,y,z=0):
     """
     Parameters:
     -----------
-    rol1t: np.array
+    t: np.array
         Days during the survey on which we had an observation (sampling) in a given OpSim.
-    rol1: np.array
-        Observed light curve points taken from the continuous light curve on days we had an observation (sampling) in a 
+    y: np.array
+        Light curve flux taken from the continuous light curve on days we had an observation (sampling) in a 
         given OpSim.
 
     Returns:
     --------
-    srol: np.array
+    s: np.array
         Mean of the squared flux difference between consecutive light curve points in a bin with edges 
-        defined by edgesrol. Used for plotting the y-axis of the structure function visualization.
-    edgesrol: np.array
+        defined by y. Used for plotting the y-axis of the structure function visualization.
+    edges: np.array
         Bin edges for the range of intervals between consecutive observation times for a given OpSim. Used for plotting the
         x-axis in the structure function visualization.
     """
 
     #KK=len(rol1t) # broj tacaka (mozda suvisno jer se ponovo definise kasnije, a pre toga se ne koristi)
     dtr=[]
-    dy1r=[]
-    KK=np.asarray(rol1.shape)[0]
+    dyr=[]
+    KK=np.asarray(y.shape)[0]
     for i in range(KK-1):
-        dtr.append(rol1t[i+1:KK] - rol1t[i])
-        dy1r.append((rol1[i+1:KK] - rol1[i])*(rol1[i+1:KK] - rol1[i]))
+        dtr.append(t[i+1:KK] - t[i])
+        dyr.append((y[i+1:KK] - y[i])*(y[i+1:KK] - y[i]))
 
     dtr = np.concatenate(dtr, axis=0)
-    dy1r = np.concatenate(dy1r, axis=0)
+    dyr = np.concatenate(dyr, axis=0)
     
-    srol, edgesrol, _ = binned_statistic(dtr, dy1r, statistic='mean', bins=np.logspace(0,4,100))
+    s, edges, _ = binned_statistic(dtr/(1+z), dyr, statistic='mean', bins=np.logspace(0,4,100))
     
-    return srol,edgesrol
+    return s, edges
     
     
-def LC_SF_viz(deltatc, long, opsims, labels, A=0.2, noise=0.05,  oscilations=True, P=500):
-
+def LC_SF_viz(long, deltatc, opsims, labels, oscillations=True, A=0.2):
     # Every time the LC_conti function is called, a random simulated light curve is generated. We do this only once because
     # we want to evaluate OpSim light curves on the same referent continuous light curve.
-    yy, tt = LC_conti(long, deltatc, oscillations, A, P)
+    tt, yy = LC_conti(long, deltatc, oscillations, A)
     
     # Now, we calculate structure function for the continuous light curve.
     
@@ -258,10 +287,10 @@ def LC_SF_viz(deltatc, long, opsims, labels, A=0.2, noise=0.05,  oscilations=Tru
     plt.setp(ax11.get_xticklabels(), visible=False)
     custom_xlim = (0, long)
     custom_ylim = (yy.min()-0.3, yy.max()+0.3)
-    ax11.set_ylabel('mag [ar.un.]', fontsize = 14)
+    ax11.set_ylabel('magnitude', fontsize = 14)
     ax11.tick_params(direction='in', pad = 5)
     plt.setp(ax11, xlim=custom_xlim, ylim=custom_ylim)
-    ax11.legend()
+    ax11.legend(loc='upper right')
     ax11.grid(True)
     
     # We will store the results from each OpSim light curve and later use those to calculate their structure functions.
@@ -332,23 +361,23 @@ def LC_SF_viz(deltatc, long, opsims, labels, A=0.2, noise=0.05,  oscilations=Tru
     
     
     
-def var_cad(yy, tt, m1=0,m2=0,m3=0,m4=0,m5=0,m6=0,m7=0,m8=0,m9=0,m10=0,m11=0,m12=0):
+def var_cad(tt, yy, m1=0,m2=0,m3=0,m4=0,m5=0,m6=0,m7=0,m8=0,m9=0,m10=0,m11=0,m12=0):
     """
     Parameters:
     -----------
-    yy: np.array
-        Flux values for the referent light curve (recommendation: if possible, use light curves with 1 day cadence for the entire duration of the survey)
     tt: np.array
         Days during the survey on which we had an observation for the referent light curve.
+    yy: np.array
+        Flux values for the referent light curve (recommendation: if possible, use light curves with 1 day cadence for the entire duration of the survey)
     m1; m2; ... ; m12: int in range [0,30], default=0 (no obseravtions)
         Cadence for each month in a year of the survey. The same combination of monthly cadences is used for each year of the survey.
         
     Returns:
     --------
-    ym: np.array
-        Flux values for the resulting light curve with user defined variable cadence.
     tm: np.array
         Days during the survey on which we had an observation for resulting light curve with user defined variable cadence.
+    ym: np.array
+        Flux values for the resulting light curve with user defined variable cadence.
     """
 
     
@@ -401,8 +430,92 @@ def var_cad(yy, tt, m1=0,m2=0,m3=0,m4=0,m5=0,m6=0,m7=0,m8=0,m9=0,m10=0,m11=0,m12
     tm = tm[ym!=-999]
     ym = ym[ym!=-999]
     
-    return ym,tm
-
+    return tm, ym
+    
+    
+def SF_heatmap(mjd, label, nlc=50, z_corr='Kelly'):
+    """
+    Parameters:
+    -----------
+    mjd: np.array
+        Days with observations in a given OpSim realization.
+    label: str
+        Label indicating which OpSim is used. It will appear in the visualization.
+    nlc: int, default=50
+        Number of light curves generated for each redshift bin.
+    z_corr: 'Kelly' or 'Standard', default='Kelly'
+        Method of calculation and conversion of tau and sigma to observed frame. See documentation for LC_conti().  
+    """
+    
+    zbin = np.linspace(0.5,6.5,7)
+    long=np.int(mjd.max()-mjd.min()+1)
+    swop=[]
+    wedgeop=[]
+    scop=[]
+    edgecop=[]
+    i=0
+    # Za svako tau se generise po 50 svetlosnih krivih.
+    for z in zbin:
+        for w in range(nlc):
+            # Generisanje kontinualne krive (kadenca=1)
+            tt, yy = LC_conti(long, z=z, z_corr=z_corr)
+            sn, edgesn = sf(tt,yy,z=z)
+            scop.append(sn)
+            edgecop.append(edgesn)
+            # Generisanje OpSim krivih za datu strategiju posmatranja. Opet, za svaki z bin imamo po 50 krivih.
+            # Za svaku od 50 krivih za jedan zbin se posebno evaluira OpSim kriva.
+            top,yop=LC_opsim(mjd,tt,yy)
+            #top=top[0:len(yop)] # proveriti da li je ovo potrebno
+            # Structure fuction za OpSim krive, opet za svaku od 50*7 krivih posebno.
+            srol,edgesrol=sf(top,yop,z=z)
+            swop.append(srol)
+            wedgeop.append(edgesrol)
+        i=i+1  # brojac
+        print(i)
+        
+    swop=np.asarray(swop)
+    swop=swop.reshape(7,nlc,99)
+    scop=np.asarray(scop)
+    scop=scop.reshape(7,nlc,99)
+    razrol=[]
+    for z in range(7):
+        for r in range(nlc):
+            # U nizu scop[z,r,:] i swop[z,r,:] zamenjujemo nan vrednosti sa nulom, a istovremeno racunamo razliku izmedju
+            # SF_conti i SF_opsim.
+            razrol.append((np.nan_to_num(np.sqrt(scop[z,r,:]))-np.nan_to_num(np.sqrt(swop[z,r,:]))))
+    
+    razrol7=np.asarray(razrol)
+    razrol7=razrol7.reshape(7,nlc,99)
+    #raz2=(razrol7[:,:,:].mean(1))
+    raz2=np.nanmean(razrol7[:,:,:],axis=1)
+    
+    plt.imshow(raz2[:,:], interpolation='bilinear',cmap='RdBu', extent=[np.log10(edgesn[:-1].min()),np.log10(edgesn[-1].max()),0,7],aspect='auto')
+    plt.xlabel(r'$\log_{10}(\Delta t)$')
+    plt.ylabel(r'z')
+    cbar=plt.colorbar()
+    cbar.set_label('averaged SF(1 day cadence) - SF(%s)' %(label))
+    plt.show()
+    
+"""    
+    razrol=[]
+    for z in range(7):
+        for r in range(nlc):
+            # U nizu scop[z,r,:] i swop[z,r,:] zamenjujemo nan vrednosti sa nulom, a istovremeno racunamo razliku izmedju
+            # SF_conti i SF_opsim.
+            razrol.append((np.sqrt(scop[z,r,:]))-np.sqrt(swop[z,r,:]))
+    
+    razrol7=np.asarray(razrol)
+    razrol7=razrol7.reshape(7,nlc,99)
+    raz2=np.nan_to_num(razrol7[:,:,:].mean(1))
+    #raz2=np.nanmean(razrol7[:,:,:],axis=1)
+    
+    plt.imshow(raz2[:,:], interpolation='bilinear',cmap='RdBu', extent=[np.log10(edgesn[:-1].min()),np.log10(edgesn[-1].max()),0,7],aspect='auto')
+    plt.xlabel(r'$\log_{10}(\Delta t)$')
+    plt.ylabel(r'z')
+    cbar=plt.colorbar()
+    cbar.set_label('averaged SF(1 day cadence) - SF(%s)' %(label))
+    plt.show()
+"""
 
 # get opsim cadence file
 def getOpSimCadence(opsim, name, ra = 0, dec = 0, fil = 'r'):
